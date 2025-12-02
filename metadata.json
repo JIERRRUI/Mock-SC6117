@@ -1,0 +1,5 @@
+{
+  "name": "Synapse - Intelligent Knowledge Base",
+  "description": "A scalable, AI-powered knowledge base inspired by Obsidian and Cursor. Features hybrid search (grep + semantic), markdown editing, and automatic content clustering using Gemini 2.5.",
+  "requestFramePermissions": []
+}
