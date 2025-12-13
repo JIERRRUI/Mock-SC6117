@@ -1,9 +1,92 @@
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Note, SearchMode, SearchResult, ProcessingStatus, ClusterNode } from './types';
-import { MOCK_NOTES } from './constants';
 import { clusterNotesWithGemini, semanticSearchWithGemini, correctTextWithGemini } from './services/geminiService';
-import { SearchIcon, FileTextIcon, NetworkIcon, ZapIcon, LayersIcon, ChevronRightIcon, ChevronDownIcon, FolderIcon, WifiOffIcon, UploadCloudIcon, XIcon, PlusIcon, WandIcon, TrashIcon } from './components/Icons';
+import { getAllNotes, saveNote, deleteNote, bulkSaveNotes } from './services/storageService';
+import { SearchIcon, FileTextIcon, NetworkIcon, ZapIcon, LayersIcon, ChevronRightIcon, ChevronDownIcon, FolderIcon, WifiOffIcon, UploadCloudIcon, XIcon, PlusIcon, WandIcon, TrashIcon, SaveIcon } from './components/Icons';
 import ClusterGraph from './components/ClusterGraph';
+
+// --- Helper Functions for File Processing ---
+
+// Convert HTML (like OneNote exports) to Markdown
+const convertHtmlToMarkdown = (html: string): string => {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  
+  // Recursive function to traverse DOM and build Markdown
+  const processNode = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      // Normalize whitespace but keep text
+      return node.textContent?.replace(/\s+/g, ' ') || '';
+    }
+    
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const el = node as HTMLElement;
+    const childrenContent = Array.from(el.childNodes).map(processNode).join('');
+    
+    // Simple HTML to Markdown mapping
+    switch (el.tagName.toLowerCase()) {
+      case 'h1': return `\n# ${childrenContent}\n\n`;
+      case 'h2': return `\n## ${childrenContent}\n\n`;
+      case 'h3': return `\n### ${childrenContent}\n\n`;
+      case 'p': return `${childrenContent}\n\n`;
+      case 'div': return `${childrenContent}\n`; // OneNote often uses divs for lines
+      case 'ul': return `${childrenContent}\n`;
+      case 'ol': return `${childrenContent}\n`;
+      case 'li': return `- ${childrenContent.trim()}\n`;
+      case 'br': return '\n';
+      case 'b': 
+      case 'strong': return ` **${childrenContent.trim()}** `;
+      case 'i': 
+      case 'em': return ` *${childrenContent.trim()}* `;
+      case 'a': return ` [${childrenContent.trim()}](${(el as HTMLAnchorElement).href}) `;
+      case 'code': 
+      case 'pre': return ` \`${childrenContent}\` `;
+      case 'head': 
+      case 'style': 
+      case 'script': return ''; // Ignore metadata
+      case 'body': return childrenContent;
+      default: return childrenContent;
+    }
+  };
+
+  const rawMarkdown = processNode(doc.body);
+  // Clean up excessive newlines
+  return rawMarkdown.replace(/\n\s+\n/g, '\n\n').trim();
+};
+
+// Extract readable text from binary files (like .one)
+const extractTextFromBinary = async (file: File): Promise<string> => {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let result = "";
+  let currentRun = "";
+  
+  // Iterate through bytes to find sequences of printable ASCII characters
+  // This mimics the unix 'strings' command
+  for (let i = 0; i < bytes.length; i++) {
+    const code = bytes[i];
+    // 32-126 are printable ASCII, 10 is LF, 13 is CR, 9 is Tab
+    if ((code >= 32 && code <= 126) || code === 10 || code === 13 || code === 9) {
+      currentRun += String.fromCharCode(code);
+    } else {
+      // If we have a run of 4+ characters, keep it
+      if (currentRun.length >= 4) {
+        result += currentRun + "\n";
+      }
+      currentRun = "";
+    }
+  }
+  // Add final run
+  if (currentRun.length >= 4) {
+    result += currentRun;
+  }
+  
+  return result.length > 0 
+    ? result 
+    : "Binary content detected but no readable text could be extracted.";
+};
 
 // --- Helper Component: Search Result Item ---
 
@@ -166,7 +249,9 @@ const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpload }) 
           </div>
           <h2 className="text-2xl font-bold text-text mb-2">Import Notes</h2>
           <p className="text-muted text-sm mb-8">
-            Upload .md or .txt files to add them to your knowledge base.
+            Upload notes to add them to your knowledge base.
+            <br/>
+            Supports <b>Markdown, Text, OneNote (.one), and HTML</b>.
           </p>
 
           <div 
@@ -181,13 +266,13 @@ const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpload }) 
               ref={fileInputRef}
               className="hidden" 
               multiple 
-              accept=".md,.txt,.markdown"
+              accept=".md,.txt,.markdown,.html,.htm,.one"
               onChange={(e) => {
                 if (e.target.files) onUpload(e.target.files);
               }}
             />
             <p className="text-sm font-medium text-text">Click to browse or drag files here</p>
-            <p className="text-xs text-muted mt-2">Supports Markdown & Text</p>
+            <p className="text-xs text-muted mt-2">.md, .txt, .html, .one</p>
           </div>
         </div>
         <div className="bg-black/20 p-4 text-center text-xs text-muted border-t border-border">
@@ -201,7 +286,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpload }) 
 
 const App = () => {
   // State
-  const [notes, setNotes] = useState<Note[]>(MOCK_NOTES);
+  const [notes, setNotes] = useState<Note[]>([]); // Initialize empty, load from DB
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<SearchMode>(SearchMode.EXACT);
@@ -210,13 +295,48 @@ const App = () => {
   const [viewMode, setViewMode] = useState<'editor' | 'graph'>('editor');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [isDbLoaded, setIsDbLoaded] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   
   // Clustering State
   const [clusters, setClusters] = useState<ClusterNode[]>([]);
   const [hasClustered, setHasClustered] = useState(false);
 
+  // Folders State for Sidebar
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+
   // Derived State
   const activeNote = useMemo(() => notes.find(n => n.id === activeNoteId), [activeNoteId, notes]);
+
+  // Group notes by folder
+  const notesByFolder = useMemo(() => {
+    const groups: { [key: string]: Note[] } = {};
+    notes.forEach(note => {
+      const folder = note.folder || '/misc';
+      if (!groups[folder]) groups[folder] = [];
+      groups[folder].push(note);
+    });
+    // Sort folders alphabetically
+    return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [notes]);
+
+  // Load notes from DB on startup
+  useEffect(() => {
+    const loadNotes = async () => {
+      try {
+        const storedNotes = await getAllNotes();
+        setNotes(storedNotes);
+        setIsDbLoaded(true);
+        // Default expand all folders
+        const allFolders = new Set(storedNotes.map(n => n.folder || '/misc'));
+        setExpandedFolders(allFolders);
+      } catch (e) {
+        console.error("Failed to load notes", e);
+        setStatus({ isProcessing: false, message: 'Error loading database' });
+      }
+    };
+    loadNotes();
+  }, []);
 
   // Offline detection
   useEffect(() => {
@@ -245,7 +365,6 @@ const App = () => {
 
     if (!isOnline && searchMode !== SearchMode.EXACT) {
       setSearchMode(SearchMode.EXACT);
-      // Fallthrough to exact search
     }
 
     setStatus({ isProcessing: true, message: 'Searching...' });
@@ -315,19 +434,41 @@ const App = () => {
     try {
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        if (file.name.endsWith('.md') || file.name.endsWith('.txt')) {
+        let content = '';
+        const name = file.name;
+        // Basic Title Extraction
+        let title = name.replace(/\.(md|txt|html|htm|one|markdown)$/i, '');
+
+        // Handle Different File Types
+        if (name.match(/\.(md|txt|markdown)$/i)) {
           const text = await file.text();
-          // Extract title from first line if it starts with #
+          content = text;
+          // Try to get title from first line # Heading
           const firstLine = text.split('\n')[0].trim();
-          let title = file.name.replace(/\.(md|txt)$/, '');
           if (firstLine.startsWith('# ')) {
             title = firstLine.substring(2);
           }
-          
+        } 
+        else if (name.match(/\.(html|htm)$/i)) {
+          // HTML Import (e.g. OneNote export)
+          const rawHtml = await file.text();
+          content = convertHtmlToMarkdown(rawHtml);
+          // Prepend title if not present
+          if (!content.startsWith('#')) {
+             content = `# ${title}\n\n${content}`;
+          }
+        } 
+        else if (name.match(/\.one$/i)) {
+          // OneNote Binary Import
+          const extractedText = await extractTextFromBinary(file);
+          content = `# ${title} (OneNote Extract)\n\n> **Note:** This content was extracted from a binary OneNote file. Formatting may be lost.\n\n${extractedText}`;
+        }
+
+        if (content) {
           newNotes.push({
             id: `imported-${Date.now()}-${i}`,
             title,
-            content: text,
+            content,
             tags: ['imported'],
             createdAt: dateStr,
             folder: '/uploads'
@@ -336,11 +477,15 @@ const App = () => {
       }
       
       if (newNotes.length > 0) {
+        // Save to DB
+        await bulkSaveNotes(newNotes);
+        // Update State
         setNotes(prev => [...prev, ...newNotes]);
-        // Reset clustering if data changed
+        setExpandedFolders(prev => new Set(prev).add('/uploads'));
+        // Reset clustering
         if (hasClustered) {
           setHasClustered(false);
-          setClusters([]); // Optional: clear clusters to force re-cluster
+          setClusters([]);
         }
       }
     } catch (error) {
@@ -353,7 +498,7 @@ const App = () => {
 
   // --- CRUD & AI Operations ---
 
-  const handleCreateNote = () => {
+  const handleCreateNote = async () => {
     const newNote: Note = {
       id: `new-${Date.now()}`,
       title: 'Untitled Note',
@@ -362,32 +507,79 @@ const App = () => {
       createdAt: new Date().toISOString().split('T')[0],
       folder: '/drafts'
     };
+    
+    // Optimistic Update
     setNotes(prev => [newNote, ...prev]);
     setActiveNoteId(newNote.id);
     setViewMode('editor');
-    // Invalidate clustering since we added a node
+    setExpandedFolders(prev => new Set(prev).add('/drafts'));
+    
     if (hasClustered) {
         setHasClustered(false);
         setClusters([]);
     }
+
+    // Persist
+    try {
+      await saveNote(newNote);
+    } catch (e) {
+      console.error("Failed to save new note", e);
+      alert("Could not save note to database");
+    }
   };
 
-  const handleUpdateNote = (id: string, field: 'title' | 'content', value: string) => {
-    setNotes(prev => prev.map(note => 
-      note.id === id ? { ...note, [field]: value } : note
-    ));
+  const handleUpdateNote = async (id: string, field: 'title' | 'content', value: string) => {
+    // 1. Update React State immediately for UI responsiveness
+    setNotes(prev => {
+        const updated = prev.map(note => 
+            note.id === id ? { ...note, [field]: value } : note
+        );
+        return updated;
+    });
+
+    // 2. Background Save
+    const noteToUpdate = notes.find(n => n.id === id);
+    if (noteToUpdate) {
+        const updatedNote = { ...noteToUpdate, [field]: value };
+        try {
+            await saveNote(updatedNote);
+        } catch (e) {
+            console.error("Background save failed", e);
+        }
+    }
   };
 
-  const handleDeleteNote = (id: string) => {
+  const handleManualSave = async () => {
+    if (!activeNote) return;
+    setIsSaving(true);
+    try {
+        await saveNote(activeNote);
+        setTimeout(() => setIsSaving(false), 1000); // Reset "Saved" text after 1s
+    } catch (e) {
+        console.error("Manual save failed", e);
+        setIsSaving(false);
+        alert("Failed to save");
+    }
+  };
+
+  const handleDeleteNote = async (id: string) => {
     if (window.confirm('Are you sure you want to delete this note?')) {
+        // Optimistic UI update
         setNotes(prev => prev.filter(n => n.id !== id));
         if (activeNoteId === id) {
             setActiveNoteId(null);
         }
-        // Invalidate clusters as the data has changed
         if (hasClustered) {
             setHasClustered(false);
             setClusters([]);
+        }
+
+        // Persist delete
+        try {
+            await deleteNote(id);
+        } catch (e) {
+            console.error("Delete failed", e);
+            alert("Failed to delete from database. Refreshing page might restore it.");
         }
     }
   };
@@ -397,13 +589,22 @@ const App = () => {
     setStatus({ isProcessing: true, message: 'Fixing grammar and spelling...' });
     try {
       const correctedText = await correctTextWithGemini(activeNote.content);
-      handleUpdateNote(activeNote.id, 'content', correctedText);
+      await handleUpdateNote(activeNote.id, 'content', correctedText);
     } catch (e) {
       console.error("Correction failed", e);
       alert("AI Correction failed.");
     } finally {
       setStatus({ isProcessing: false, message: '' });
     }
+  };
+
+  const toggleFolder = (folder: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder);
+      else next.add(folder);
+      return next;
+    });
   };
 
   // --- Rendering ---
@@ -456,6 +657,15 @@ const App = () => {
                     <span>{activeNote.createdAt}</span>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button 
+                    onClick={handleManualSave}
+                    disabled={isSaving}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors text-xs font-medium border ${isSaving ? 'bg-green-500/10 text-green-500 border-green-500/20' : 'bg-primary/10 text-primary hover:bg-primary/20 border-primary/20'}`}
+                    title="Save Note"
+                  >
+                     <SaveIcon className="w-3 h-3" />
+                     {isSaving ? 'Saved' : 'Save'}
+                  </button>
                   {isOnline && (
                       <button 
                           onClick={handleAICorrect}
@@ -571,13 +781,15 @@ const App = () => {
           </button>
         </div>
 
-        {/* File Explorer (Auto-generated from clusters or flat list) */}
+        {/* File Explorer (Auto-generated from clusters or grouped folder list) */}
         <div className="flex-1 overflow-y-auto p-2">
           <div className="text-xs font-bold text-muted uppercase tracking-wider mb-2 pl-2">
             {clusters.length > 0 ? 'AI Clusters' : 'Files'}
           </div>
           
-          {clusters.length > 0 ? (
+          {!isDbLoaded ? (
+            <div className="pl-2 text-xs text-muted">Loading database...</div>
+          ) : clusters.length > 0 ? (
             <div className="space-y-1">
               {clusters.map(cluster => (
                 <FileTreeNode 
@@ -593,29 +805,49 @@ const App = () => {
               ))}
             </div>
           ) : (
-             // Fallback flat list grouped manually by folder just for display
-             <div className="space-y-1 pl-2">
-               {notes.map(note => (
-                 <div 
-                   key={note.id}
-                   onClick={() => { setActiveNoteId(note.id); setViewMode('editor'); }}
-                   className={`group flex items-center gap-2 p-1.5 rounded cursor-pointer text-sm ${activeNoteId === note.id ? 'bg-primary/20 text-primary' : 'text-muted hover:text-text'}`}
-                 >
-                   <FileTextIcon className="w-4 h-4 opacity-70" />
-                   <span className="truncate flex-1">{note.title}</span>
-                   <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            e.preventDefault();
-                            handleDeleteNote(note.id);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-500/20 hover:text-red-400 text-muted transition-all rounded z-10"
-                        title="Delete note"
-                    >
-                        <TrashIcon className="w-3 h-3" />
-                    </button>
-                 </div>
-               ))}
+             // Grouped by Folder
+             <div className="space-y-1">
+               {notesByFolder.map(([folder, folderNotes]) => {
+                 const isExpanded = expandedFolders.has(folder);
+                 return (
+                   <div key={folder}>
+                     <div 
+                        onClick={() => toggleFolder(folder)}
+                        className="flex items-center gap-1 py-1 px-2 cursor-pointer text-sm text-text hover:bg-white/5 transition-colors font-medium select-none"
+                     >
+                       {isExpanded ? <ChevronDownIcon className="w-4 h-4 text-muted" /> : <ChevronRightIcon className="w-4 h-4 text-muted" />}
+                       <FolderIcon className="w-4 h-4 text-primary" />
+                       <span className="truncate">{folder.replace(/^\//, '')}</span>
+                     </div>
+                     
+                     {isExpanded && (
+                       <div className="pl-3 border-l border-border ml-3 mt-1 space-y-1">
+                         {folderNotes.map(note => (
+                           <div 
+                             key={note.id}
+                             onClick={() => { setActiveNoteId(note.id); setViewMode('editor'); }}
+                             className={`group flex items-center gap-2 p-1.5 rounded cursor-pointer text-sm ${activeNoteId === note.id ? 'bg-primary/20 text-primary' : 'text-muted hover:text-text'}`}
+                           >
+                             <FileTextIcon className="w-4 h-4 opacity-70" />
+                             <span className="truncate flex-1">{note.title}</span>
+                             <button
+                                  onClick={(e) => {
+                                      e.stopPropagation();
+                                      e.preventDefault();
+                                      handleDeleteNote(note.id);
+                                  }}
+                                  className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-500/20 hover:text-red-400 text-muted transition-all rounded z-10"
+                                  title="Delete note"
+                              >
+                                  <TrashIcon className="w-3 h-3" />
+                              </button>
+                           </div>
+                         ))}
+                       </div>
+                     )}
+                   </div>
+                 );
+               })}
              </div>
           )}
         </div>
@@ -644,6 +876,13 @@ const App = () => {
               </div>
             )}
           </div>
+          
+          <button
+            onClick={handleSearch}
+            className="px-4 py-2 bg-primary hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-blue-900/20 flex items-center gap-2"
+          >
+            Search
+          </button>
 
           <div className="flex bg-surface rounded-lg p-1 border border-border">
             <button
