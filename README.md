@@ -8,10 +8,12 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/drive/1JV3s9WxjvRtbeDklhPX-Yu0GkhCgeSv6
 
+Get API key from https://aistudio.google.com/
+Need to also enable Vertex API at https://docs.cloud.google.com/vertex-ai/generative-ai/docs/embeddings/get-text-embeddings
+
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js
 
 1. Install dependencies:
    `npm install`
