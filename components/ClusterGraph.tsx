@@ -84,7 +84,7 @@ const processData = (clusters: ClusterNode[]) => {
   return { nodes, links };
 };
 
-const ClusterGraph: React.FC<ClusterGraphProps> = ({ clusters, onNoteSelect }) => {
+const ClusterGraphComponent: React.FC<ClusterGraphProps> = ({ clusters, onNoteSelect }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -249,5 +249,8 @@ const ClusterGraph: React.FC<ClusterGraphProps> = ({ clusters, onNoteSelect }) =
     </div>
   );
 };
+
+// Memoize to prevent unnecessary re-renders when parent component updates but clusters/onNoteSelect haven't changed
+const ClusterGraph = React.memo(ClusterGraphComponent);
 
 export default ClusterGraph;

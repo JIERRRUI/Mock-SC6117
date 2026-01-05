@@ -641,6 +641,12 @@ const App = () => {
     });
   };
 
+  // Memoize the ClusterGraph callback to prevent re-renders when parent updates
+  const handleSelectNoteFromGraph = useCallback((id: string) => {
+    setActiveNoteId(id);
+    setViewMode('editor');
+  }, []);
+
   // --- Rendering ---
 
   const renderContent = () => {
@@ -670,10 +676,7 @@ const App = () => {
           <div className="flex-1 overflow-hidden">
             <ClusterGraph 
               clusters={clusters} 
-              onNoteSelect={(id) => {
-                setActiveNoteId(id);
-                setViewMode('editor');
-              }} 
+              onNoteSelect={handleSelectNoteFromGraph} 
             />
           </div>
         </div>
