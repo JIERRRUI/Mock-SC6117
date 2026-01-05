@@ -1,3 +1,22 @@
+/**
+ * Clustering Service
+ *
+ * This service provides intelligent clustering of notes using a combination of:
+ * 1. LLM-based semantic analysis (Gemini AI)
+ * 2. Embedding-based similarity clustering
+ * 3. Hierarchical organization (domains → subtopics → notes)
+ *
+ * Key Features:
+ * - Incremental clustering: Only processes new/changed notes
+ * - Hash-based change detection: Efficiently identifies modified notes
+ * - Memory buffer: Maintains clustering history for improved consistency
+ * - 3-level hierarchy: Root → Domains → Subtopics → Notes
+ *
+ * Main Entry Points:
+ * - incrementalCluster(): Primary function for clustering with smart caching
+ * - fullSemanticClustering(): Complete pipeline with semantic enhancement
+ */
+
 import {
   Note,
   ClusterNode,
@@ -26,27 +45,31 @@ import {
   loadEmbeddingIndex,
 } from "./embeddingService";
 
-// Minimal, incremental clustering scaffolding with caching.
-// Vector-store integration and embeddings are planned but not required to run.
+// ============================================================================
+// Configuration & Constants
+// ============================================================================
 
 export interface IngestionResult {
   notes: Note[];
   changedNoteIds: string[];
 }
 
-// Simple content hash to detect changes (not cryptographic).
+/** Simple content hash for change detection (non-cryptographic) */
 const fastHash = (s: string) => {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return h.toString(16);
 };
 
+// LocalStorage keys for caching
 const CACHE_KEY = "clusters_cache_v1";
 const HASH_INDEX_KEY = "note_hash_index_v1";
 const MEMORY_KEY = "clustering_memory_v1";
 const MAX_MEMORY_SIZE = 50; // Keep last 50 clustering decisions
 
-// --- Dynamic Memory System Implementation ---
+// ============================================================================
+// Dynamic Memory System
+// ============================================================================
 
 class ClusteringMemoryBuffer implements MemoryBuffer {
   private memory: ClusteringMemory;
@@ -753,111 +776,6 @@ export const enhancedCluster = async (
   return clusters;
 };
 
-// Planned: embedding generation + vector-store upserts.
-// Stubbed for now; kept to define API for Developer 2/DB task.
-export interface EmbeddingChunk {
-  noteId: string;
-  text: string;
-  chunkIndex: number;
-}
-
-export const chunkNote = (
-  note: Note,
-  maxLen = 800,
-  overlap = 100
-): EmbeddingChunk[] => {
-  const chunks: EmbeddingChunk[] = [];
-  const text = `${note.title}\n\n${note.content}`;
-  let i = 0;
-  let idx = 0;
-  while (i < text.length) {
-    const end = Math.min(text.length, i + maxLen);
-    const slice = text.slice(i, end);
-    chunks.push({ noteId: note.id, text: slice, chunkIndex: idx++ });
-    if (end >= text.length) break;
-    i = end - overlap;
-  }
-  return chunks;
-};
-
-export const upsertEmbeddings = async (
-  _chunks: EmbeddingChunk[]
-): Promise<void> => {
-  // TODO: Generate embeddings and upsert to vector store with metadata.
-  // This will be implemented by Developer 2 / DB task.
-};
-
-export const clusterWithEmbeddings = async (
-  notes: Note[]
-): Promise<ClusterNode[]> => {
-  console.log(
-    `🔗 clusterWithEmbeddings: Processing ${notes.length} notes with 3-level hierarchical clustering...`
-  );
-
-  try {
-    // Use 3-level hierarchical clustering:
-    // Level 0: Root, Level 1: Domains, Level 2: Subtopics
-    const clusters = await hierarchicalHybridClustering(
-      notes,
-      0.75, // Domain threshold (higher = more domains)
-      0.8 // Subtopic threshold (higher = more granular subtopics)
-    );
-
-    console.log(
-      `✅ Hierarchical clustering complete: ${clusters.length} top-level domains`
-    );
-    writeCachedClusters(clusters);
-    return clusters;
-  } catch (e) {
-    console.error(
-      "❌ Embedding clustering failed, falling back to LLM clustering:",
-      e
-    );
-    return incrementalCluster(notes);
-  }
-};
-
-// --- Benchmarking utilities ---
-export interface BenchmarkResult {
-  noteCount: number;
-  durationMs: number;
-  usedCache: boolean;
-}
-
-export const generateSyntheticNotes = (count = 1000): Note[] => {
-  const notes: Note[] = [];
-  const now = new Date().toISOString().split("T")[0];
-  for (let i = 0; i < count; i++) {
-    notes.push({
-      id: `synthetic-${i}`,
-      title: `Transformer Note ${i}`,
-      content: `# Attention & Transformers\n\nThis is synthetic content about transformer architecture, attention mechanisms, and embeddings. Index: ${i}.\n\nKey terms: attention, transformer, GPT, BERT, tokens, sequence, context.`,
-      tags: ["ai", "nlp", "transformer"],
-      createdAt: now,
-      folder: "/synthetic/ai",
-    });
-  }
-  return notes;
-};
-
-export const benchmarkClustering = async (
-  count = 1000
-): Promise<BenchmarkResult> => {
-  const synthetic = generateSyntheticNotes(count);
-  const start = performance.now();
-  const before = readCachedClusters();
-  const clusters = await incrementalCluster(synthetic);
-  const end = performance.now();
-  const after = clusters;
-  return {
-    noteCount: count,
-    durationMs: Math.round(end - start),
-    usedCache:
-      before.length > 0 &&
-      synthetic.every((n) => readHashIndex()[n.id]) &&
-      after.length === before.length,
-  };
-};
 // --- Hybrid Clustering with Embeddings (Phase 2) ---
 
 /**

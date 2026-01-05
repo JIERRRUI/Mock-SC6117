@@ -1,12 +1,35 @@
+/**
+ * Gemini AI Service
+ *
+ * This service provides all LLM-based operations using Google's Gemini AI models.
+ * It handles clustering, semantic search, text correction, and semantic analysis.
+ *
+ * Key Features:
+ * - Dual-prompt clustering with memory augmentation
+ * - Semantic search with natural language understanding
+ * - Text correction and grammar checking
+ * - Semantic centroid generation for clusters
+ * - Hard sample detection for edge cases
+ *
+ * Main Entry Points:
+ * - dualPromptClusterNotesWithGemini(): Two-phase LLM clustering
+ * - semanticSearchWithGemini(): Natural language search
+ * - correctTextWithGemini(): Grammar and style correction
+ * - generateClusterName(): Generate descriptive cluster names
+ */
+
 import { ClusteringDecision, MemoryBuffer } from "../types";
 import { memoryBuffer as globalMemoryBuffer } from "./clusteringService";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Note, ClusterNode, SearchResult } from "../types";
 import { SemanticCentroid, HardSample } from "../types";
 
-// ⚙️ CONFIGURATION
+// ============================================================================
+// Configuration
+// ============================================================================
+
 const CONFIG = {
-  // Model selection: "gemini-2.5-flash-lite" | "gemini-2.5-flash" | "gemini-2.5-pro" | "gemini-3-pro"
+  /** Model selection for LLM operations */
   modelName: "gemini-2.5-flash-lite" as const,
 };
 
@@ -18,7 +41,11 @@ const getAIClient = () => {
   return new GoogleGenAI({ apiKey });
 };
 
-// Helper to extract text from GenAI response
+// ============================================================================
+// Response Helpers
+// ============================================================================
+
+/** Extract text from various GenAI response formats */
 const extractResponseText = (response: any): string => {
   if (!response) {
     console.warn("❌ Response is null/undefined");

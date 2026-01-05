@@ -1,3 +1,22 @@
+/**
+ * Embedding Service
+ *
+ * This service generates and manages vector embeddings for notes using Google's
+ * Gemini text-embedding-004 model. Embeddings enable semantic similarity search
+ * and content-based clustering.
+ *
+ * Key Features:
+ * - Batch embedding generation with concurrency control
+ * - LocalStorage caching with TTL (7 days)
+ * - Cosine similarity computation
+ * - DBSCAN-like clustering based on embedding proximity
+ *
+ * Main Entry Points:
+ * - getOrGenerateEmbeddings(): Get embeddings with smart caching
+ * - embeddingGuidedPartitioning(): Cluster notes by embedding similarity
+ * - findSimilarPairs(): Find pairs of similar notes
+ */
+
 import {
   Note,
   NoteEmbedding,
@@ -7,6 +26,10 @@ import {
 } from "../types";
 import { GoogleGenAI } from "@google/genai";
 
+// ============================================================================
+// Configuration
+// ============================================================================
+
 const getAIClient = () => {
   const apiKey = process.env.API_KEY;
   if (!apiKey) {
@@ -15,11 +38,12 @@ const getAIClient = () => {
   return new GoogleGenAI({ apiKey });
 };
 
-// --- Embedding Cache Management ---
-
 const EMBEDDING_CACHE_KEY = "embedding_index_v1";
-// Use the correct Gemini embedding model name
 const EMBEDDING_MODEL = "text-embedding-004";
+
+// ============================================================================
+// Cache Management
+// ============================================================================
 
 export const loadEmbeddingIndex = (): EmbeddingIndex => {
   try {
