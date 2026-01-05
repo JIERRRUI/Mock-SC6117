@@ -6,6 +6,7 @@ import { executeExactSearch, executeHybridSearch } from './services/searchServic
 import { getAllNotes, saveNote, deleteNote, bulkSaveNotes } from './services/storageService';
 import { SearchIcon, FileTextIcon, NetworkIcon, ZapIcon, LayersIcon, ChevronRightIcon, ChevronDownIcon, FolderIcon, WifiOffIcon, UploadCloudIcon, XIcon, PlusIcon, WandIcon, TrashIcon, SaveIcon } from './components/Icons';
 import ClusterGraph from './components/ClusterGraph';
+import ConfirmationModal from './components/ConfirmationModal';
 
 // --- Helper Functions for File Processing ---
 
@@ -328,6 +329,68 @@ const App = () => {
     return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]));
   }, [notes]);
 
+  // Data used to control pop-up windows
+  const [moveRequest, setMoveRequest] = useState<{
+      noteId: string;
+      noteTitle: string;
+      targetClusterId: string;
+      targetClusterName: string;
+  } | null>(null);
+
+  const handleNodeReparent = (noteId: string, newClusterId: string, newClusterName: string) => {
+    const targetNote = notes.find(n => n.id === noteId);
+    if (!targetNote) return;
+
+    // Store the move request in state to be processed
+    setMoveRequest({
+        noteId,
+        noteTitle: targetNote.title,
+        targetClusterId: newClusterId,
+        targetClusterName: newClusterName
+    });
+  };
+
+  const executeMove = async () => {
+    if (!moveRequest) return;
+    const { noteId, targetClusterName, targetClusterId } = moveRequest;
+
+    const newFolderPath = `/${targetClusterName.replace(/[\\/:*?"<>|]/g, "")}`;
+
+    // 1. Update database
+    await handleUpdateNote(noteId, 'folder', newFolderPath);
+
+    // 2. Update UI (Visual Hack)
+    setClusters(prev => {
+        return prev.map(cluster => {
+            // Remove
+            if (cluster.children?.some(c => c.noteId === noteId) && cluster.id !== targetClusterId) {
+                return {
+                    ...cluster,
+                    children: cluster.children.filter(c => c.noteId !== noteId)
+                };
+            }
+            // Add
+            if (cluster.id === targetClusterId) {
+                 // Reuse the original ID as much as possible or maintain consistency
+                 const noteNode = { 
+                     id: `node-${noteId}`, 
+                     name: moveRequest.noteTitle, // Use the title in the state
+                     type: "note" as const, 
+                     noteId: noteId 
+                 };
+                 return {
+                     ...cluster,
+                     children: [...(cluster.children || []), noteNode]
+                 };
+            }
+            return cluster;
+        });
+    });
+
+    // 3. Close pop-up window
+    setMoveRequest(null);
+  };
+
   // Load notes from DB on startup
   useEffect(() => {
     const loadNotes = async () => {
@@ -533,7 +596,7 @@ const App = () => {
     }
   };
 
-  const handleUpdateNote = async (id: string, field: 'title' | 'content', value: string) => {
+  const handleUpdateNote = async (id: string, field: 'title' | 'content' | 'folder', value: string) => {
     // 1. Update React State immediately for UI responsiveness
     setNotes(prev => {
         const updated = prev.map(note => 
@@ -645,6 +708,7 @@ const App = () => {
                 setActiveNoteId(id);
                 setViewMode('editor');
               }} 
+              onNodeReparent={handleNodeReparent} // <--- Pass the handler
             />
           </div>
         </div>
@@ -937,7 +1001,28 @@ const App = () => {
         </div>
 
       </div>
-    </div>
+      {/*Enhanced pop-up window */}  
+    <ConfirmationModal 
+    isOpen={!!moveRequest}
+    title="Reorganize Knowledge"
+    message={
+        <div className="space-y-2">
+            <p>Are you sure you want to move this note?</p>
+            <div className="flex items-center gap-2 p-3 bg-black/20 rounded border border-white/5">
+                <span className="text-gray-400">Note:</span>
+                <span className="font-bold text-white">{moveRequest?.noteTitle}</span>
+            </div>
+            <div className="flex justify-center text-gray-500">↓</div>
+            <div className="flex items-center gap-2 p-3 bg-blue-500/10 rounded border border-blue-500/20">
+                <span className="text-blue-300">New Cluster:</span>
+                <span className="font-bold text-blue-100">{moveRequest?.targetClusterName}</span>
+            </div>
+        </div>
+    }
+    onConfirm={executeMove}
+    onCancel={() => setMoveRequest(null)}
+    />
+  </div>
   );
 };
 
