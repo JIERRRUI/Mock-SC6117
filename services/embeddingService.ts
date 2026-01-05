@@ -300,8 +300,8 @@ export const findSimilarPairs = (
  */
 export const embeddingGuidedPartitioning = (
   embeddings: NoteEmbedding[],
-  similarityThreshold: number = 0.65,
-  minClusterSize: number = 2
+  similarityThreshold: number = 0.7,
+  minClusterSize: number = 1
 ): EmbeddingPartition[] => {
   const partitions: EmbeddingPartition[] = [];
   const assignedNotes = new Set<string>(); // Notes assigned to a valid cluster

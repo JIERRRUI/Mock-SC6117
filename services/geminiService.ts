@@ -262,7 +262,7 @@ You are an expert knowledge organizer specializing in semantic categorization.
 Analyze these notes and group them into meaningful thematic clusters. 
 
 IMPORTANT RULES:
-1. Create 2-5 clusters maximum (prefer fewer, broader categories)
+1. Create 3-8 clusters (aim for a balanced number based on content diversity)
 2. Each cluster name should be a clear, descriptive topic (2-4 words)
 3. Group notes by their core subject matter, not surface-level keywords
 4. Every note MUST be assigned to exactly one cluster

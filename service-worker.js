@@ -1,33 +1,36 @@
-
-const CACHE_NAME = 'synapse-v1';
+const CACHE_NAME = "synapse-v1";
 
 // Install: Skip waiting to activate immediately
-self.addEventListener('install', (event) => {
+self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
 
 // Activate: Clean up old caches and claim clients
-self.addEventListener('activate', (event) => {
+self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    }).then(() => self.clients.claim())
+    caches
+      .keys()
+      .then((cacheNames) => {
+        return Promise.all(
+          cacheNames.map((cacheName) => {
+            if (cacheName !== CACHE_NAME) {
+              return caches.delete(cacheName);
+            }
+          })
+        );
+      })
+      .then(() => self.clients.claim())
   );
 });
 
 // Fetch: Hybrid Strategy
-self.addEventListener('fetch', (event) => {
+self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   // 1. CDNs (Immutable libraries): Cache First, fallback to Network
   // This ensures fast loads and offline availability for React, Tailwind, D3
-  const isCDN = url.hostname.includes('cdn') || url.hostname.includes('aistudiocdn');
+  const isCDN =
+    url.hostname.includes("cdn") || url.hostname.includes("aistudiocdn");
 
   if (isCDN) {
     event.respondWith(
@@ -37,13 +40,22 @@ self.addEventListener('fetch', (event) => {
         }
         return fetch(event.request).then((networkResponse) => {
           // Check for valid response
-          if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'cors' && networkResponse.type !== 'basic' && networkResponse.type !== 'opaque') {
+          if (
+            !networkResponse ||
+            networkResponse.status !== 200 ||
+            (networkResponse.type !== "cors" &&
+              networkResponse.type !== "basic" &&
+              networkResponse.type !== "opaque")
+          ) {
             return networkResponse;
           }
-          const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
+          // Only cache GET requests
+          if (event.request.method === "GET") {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseToCache);
+            });
+          }
           return networkResponse;
         });
       })
@@ -55,10 +67,13 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(event.request)
         .then((networkResponse) => {
-          const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
+          // Only cache GET requests
+          if (event.request.method === "GET") {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseToCache);
+            });
+          }
           return networkResponse;
         })
         .catch(() => {

@@ -23,6 +23,7 @@ import {
   getOrGenerateEmbeddings,
   embeddingGuidedPartitioning,
   getEmbeddingStats,
+  loadEmbeddingIndex,
 } from "./embeddingService";
 
 // Minimal, incremental clustering scaffolding with caching.
@@ -186,15 +187,31 @@ export const ingestNotes = (notes: Note[]): IngestionResult => {
   const idx = readHashIndex();
   const changed: string[] = [];
 
+  console.log(
+    `📊 Ingesting ${notes.length} notes, hash index has ${
+      Object.keys(idx).length
+    } entries`
+  );
+
   for (const n of notes) {
     const h = fastHash(`${n.title}\n${n.content}`);
     if (idx[n.id] !== h) {
+      if (idx[n.id]) {
+        console.log(
+          `  🔄 Note changed: ${n.title} (${n.id.substring(0, 8)}...)`
+        );
+      } else {
+        console.log(`  🆕 New note: ${n.title} (${n.id.substring(0, 8)}...)`);
+      }
       idx[n.id] = h;
       changed.push(n.id);
     }
   }
 
   writeHashIndex(idx);
+  console.log(
+    `✅ Detected ${changed.length} changed/new notes out of ${notes.length} total`
+  );
   return { notes, changedNoteIds: changed };
 };
 
@@ -243,20 +260,191 @@ export const iterativeClusterWithRefinement = async (
   return { clusters, iterations, converged: false };
 };
 
-// Incremental clustering: if few notes changed, you can re-cluster selectively.
-// For now, we call the existing Gemini clustering across all notes, but
-// preserve caching and return immediately if nothing changed.
+// Incremental clustering: if few notes changed, only process those and merge into existing clusters
 export const incrementalCluster = async (
-  notes: Note[]
+  notes: Note[],
+  existingClusters?: ClusterNode[]
 ): Promise<ClusterNode[]> => {
   const { changedNoteIds } = ingestNotes(notes);
+
+  // Use passed clusters or fall back to cache
+  const cached =
+    existingClusters && existingClusters.length > 0
+      ? existingClusters
+      : readCachedClusters();
+
+  console.log(
+    `  📦 Using ${cached.length} existing clusters ${
+      existingClusters ? "(from React state)" : "(from cache)"
+    }`
+  );
+
+  // No changes - return cached clusters
   if (changedNoteIds.length === 0) {
-    const cached = readCachedClusters();
-    if (cached.length > 0) return cached;
+    if (cached.length > 0) {
+      console.log(
+        `✅ No changes detected, using cached ${cached.length} clusters`
+      );
+      return cached;
+    }
   }
 
-  // Use the new 3-phase semantic clustering pipeline
-  console.log("🚀 Running full semantic clustering pipeline...");
+  // True incremental: only process new/changed notes if we have existing clusters
+  // and changes are less than 30% of total notes
+  const changeRatio = changedNoteIds.length / notes.length;
+  if (cached.length > 0 && changeRatio < 0.3) {
+    console.log(
+      `🔄 Incremental update: ${
+        changedNoteIds.length
+      } changed notes (${Math.round(changeRatio * 100)}%)`
+    );
+
+    // Get only the new/changed notes
+    const changedNotes = notes.filter((n) => changedNoteIds.includes(n.id));
+
+    // Load ALL existing embeddings from cache FIRST
+    const embeddingIndex = loadEmbeddingIndex();
+    let allEmbeddings = [...embeddingIndex.embeddings];
+    console.log(`  📊 Loaded ${allEmbeddings.length} cached embeddings`);
+
+    // Generate embeddings for new notes only (using the full notes list to preserve cache)
+    // Pass ALL notes but only new ones will be generated due to cache check
+    const updatedEmbeddings = await getOrGenerateEmbeddings(notes, false);
+    allEmbeddings = updatedEmbeddings;
+
+    // Get embeddings for just the new notes
+    const newEmbeddings = allEmbeddings.filter((e) =>
+      changedNotes.some((n) => n.id === e.noteId)
+    );
+
+    console.log(`  📊 Total embeddings available: ${allEmbeddings.length}`);
+    console.log(
+      `  🆕 New embeddings for changed notes: ${newEmbeddings.length}`
+    );
+
+    // True incremental update - add new notes to existing clusters
+    const updatedClusters = [...cached];
+
+    for (const newNote of changedNotes) {
+      // Check if note already exists in clusters (avoid duplicates)
+      const alreadyExists = updatedClusters.some((cluster) =>
+        cluster.children?.some((c) => c.noteId === newNote.id)
+      );
+      if (alreadyExists) {
+        console.log(
+          `  ⏭️ Note "${newNote.title}" already in clusters, skipping`
+        );
+        continue;
+      }
+
+      const newEmb = newEmbeddings.find((e) => e.noteId === newNote.id);
+
+      // Use embedding similarity matching if we have the new note's embedding
+      if (newEmb && allEmbeddings.length > 1) {
+        // Find most similar existing cluster
+        let bestCluster: ClusterNode | null = null;
+        let bestSimilarity = 0;
+        let bestClusterName = "";
+
+        for (const cluster of updatedClusters) {
+          if (cluster.type !== "cluster" || !cluster.children) continue;
+
+          // Get embeddings of notes in this cluster (recursively check nested clusters too)
+          const clusterNoteIds = collectNoteIds(cluster);
+
+          const clusterEmbeddings = allEmbeddings.filter((e) =>
+            clusterNoteIds.includes(e.noteId)
+          );
+
+          if (clusterEmbeddings.length === 0) continue;
+
+          // Compute average similarity to cluster
+          let totalSim = 0;
+          for (const cEmb of clusterEmbeddings) {
+            const sim = cosineSimilarity(newEmb.vector, cEmb.vector);
+            totalSim += sim;
+          }
+          const avgSim = totalSim / clusterEmbeddings.length;
+
+          if (avgSim > bestSimilarity) {
+            bestSimilarity = avgSim;
+            bestCluster = cluster;
+            bestClusterName = cluster.name;
+          }
+        }
+
+        // Add to best matching cluster if similarity > 0.5 (higher threshold for embeddings)
+        if (bestCluster && bestSimilarity > 0.5) {
+          console.log(
+            `  ➕ Adding "${
+              newNote.title
+            }" to cluster "${bestClusterName}" (embedding similarity: ${bestSimilarity.toFixed(
+              2
+            )})`
+          );
+          bestCluster.children!.push({
+            id: `note-${newNote.id}`,
+            name: newNote.title,
+            type: "note",
+            noteId: newNote.id,
+          });
+          continue;
+        }
+      }
+
+      // Fallback: Use content-based matching to find best cluster
+      const matchedCluster = await findBestClusterForNote(
+        newNote,
+        updatedClusters
+      );
+
+      if (matchedCluster) {
+        console.log(
+          `  🎯 Adding "${newNote.title}" to cluster "${matchedCluster.name}" (content match)`
+        );
+        matchedCluster.children = matchedCluster.children || [];
+        matchedCluster.children.push({
+          id: `note-${newNote.id}`,
+          name: newNote.title,
+          type: "note",
+          noteId: newNote.id,
+        });
+      } else {
+        // Create a new cluster with a meaningful name based on note content
+        const clusterName = await generateClusterNameForNote(newNote);
+        console.log(
+          `  🆕 Creating new cluster "${clusterName}" for "${newNote.title}"`
+        );
+        updatedClusters.push({
+          id: `cluster-new-${Date.now()}-${newNote.id}`,
+          name: clusterName,
+          type: "cluster",
+          description: `Cluster created for: ${newNote.title}`,
+          children: [
+            {
+              id: `note-${newNote.id}`,
+              name: newNote.title,
+              type: "note",
+              noteId: newNote.id,
+            },
+          ],
+        });
+      }
+    }
+
+    writeCachedClusters(updatedClusters);
+    console.log(
+      `✅ Incremental clustering complete: ${updatedClusters.length} clusters`
+    );
+    return updatedClusters;
+  }
+
+  // Major changes or no existing clusters - run full clustering
+  console.log(
+    `🚀 Running full semantic clustering pipeline (${
+      changedNoteIds.length
+    } changes, ${Math.round(changeRatio * 100)}%)...`
+  );
   const result = await fullSemanticClustering(notes, {
     useHybridEmbeddings: true,
     useSemanticEnhancement: true,
@@ -275,6 +463,261 @@ export const incrementalCluster = async (
 
   writeCachedClusters(result.clusters);
   return result.clusters;
+};
+
+// Helper: Compute cosine similarity between two vectors (used in incremental clustering)
+const cosineSimilarity = (vec1: number[], vec2: number[]): number => {
+  if (vec1.length === 0 || vec2.length === 0) return 0;
+  let dotProduct = 0;
+  let norm1 = 0;
+  let norm2 = 0;
+  for (let i = 0; i < vec1.length; i++) {
+    dotProduct += vec1[i] * vec2[i];
+    norm1 += vec1[i] * vec1[i];
+    norm2 += vec2[i] * vec2[i];
+  }
+  norm1 = Math.sqrt(norm1);
+  norm2 = Math.sqrt(norm2);
+  if (norm1 === 0 || norm2 === 0) return 0;
+  return dotProduct / (norm1 * norm2);
+};
+
+// Helper: Recursively collect all note IDs from a cluster (including nested clusters)
+const collectNoteIds = (cluster: ClusterNode): string[] => {
+  const noteIds: string[] = [];
+  if (!cluster.children) return noteIds;
+
+  for (const child of cluster.children) {
+    if (child.type === "note" && child.noteId) {
+      noteIds.push(child.noteId);
+    } else if (child.type === "cluster") {
+      noteIds.push(...collectNoteIds(child));
+    }
+  }
+  return noteIds;
+};
+
+// Helper: Extract keywords from text for matching
+const extractKeywords = (text: string): string[] => {
+  const stopWords = new Set([
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "can",
+    "need",
+    "dare",
+    "to",
+    "of",
+    "in",
+    "for",
+    "on",
+    "with",
+    "at",
+    "by",
+    "from",
+    "as",
+    "into",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "between",
+    "under",
+    "again",
+    "further",
+    "then",
+    "once",
+    "here",
+    "there",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "so",
+    "than",
+    "too",
+    "very",
+    "just",
+    "and",
+    "but",
+    "if",
+    "or",
+    "because",
+    "until",
+    "while",
+    "this",
+    "that",
+    "these",
+    "those",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "it",
+    "its",
+  ]);
+
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !stopWords.has(word));
+};
+
+// Helper: Find best matching cluster for a note using content analysis
+const findBestClusterForNote = async (
+  note: Note,
+  clusters: ClusterNode[]
+): Promise<ClusterNode | null> => {
+  const noteKeywords = extractKeywords(note.title + " " + note.content);
+
+  if (noteKeywords.length === 0) return null;
+
+  let bestCluster: ClusterNode | null = null;
+  let bestScore = 0;
+  let bestMatchDetails = "";
+
+  for (const cluster of clusters) {
+    if (cluster.type !== "cluster") continue;
+
+    // Build cluster keywords from name and child note names
+    const clusterText = [
+      cluster.name,
+      cluster.description || "",
+      ...(cluster.children?.map((c) => c.name) || []),
+    ].join(" ");
+
+    const clusterKeywords = extractKeywords(clusterText);
+
+    // Calculate keyword overlap - STRICT matching only (exact match or one contains the other with min 4 chars)
+    const overlap = noteKeywords.filter((kw) =>
+      clusterKeywords.some((ck) => {
+        // Exact match
+        if (kw === ck) return true;
+        // One contains the other (only for words >= 4 chars to avoid false positives)
+        if (kw.length >= 4 && ck.length >= 4) {
+          if (ck.includes(kw) || kw.includes(ck)) return true;
+        }
+        return false;
+      })
+    );
+
+    // Require at least 40% overlap and at least 1 matching keyword
+    const score = overlap.length / Math.max(noteKeywords.length, 1);
+
+    if (overlap.length >= 1 && score > bestScore && score >= 0.4) {
+      bestScore = score;
+      bestCluster = cluster;
+      bestMatchDetails = `matched keywords: [${overlap.join(", ")}]`;
+    }
+  }
+
+  if (bestCluster) {
+    console.log(
+      `    📝 Content match: ${bestMatchDetails} (score: ${bestScore.toFixed(
+        2
+      )})`
+    );
+  }
+
+  return bestCluster;
+};
+
+// Helper: Levenshtein distance for fuzzy matching
+const levenshteinDistance = (str1: string, str2: string): number => {
+  const m = str1.length;
+  const n = str2.length;
+  const dp: number[][] = Array(m + 1)
+    .fill(null)
+    .map(() => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+
+  return dp[m][n];
+};
+
+// Helper: Generate a meaningful cluster name for a new note
+const generateClusterNameForNote = async (note: Note): Promise<string> => {
+  // Try to derive from note title first
+  const titleWords = extractKeywords(note.title);
+
+  if (titleWords.length > 0) {
+    // Create a topic name from first 2-3 meaningful words
+    const topicWords = titleWords.slice(0, 3);
+    return topicWords
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  }
+
+  // Fallback to content analysis
+  const contentWords = extractKeywords(note.content);
+  if (contentWords.length > 0) {
+    // Find most frequent words
+    const wordFreq: Record<string, number> = {};
+    for (const word of contentWords) {
+      wordFreq[word] = (wordFreq[word] || 0) + 1;
+    }
+
+    const topWords = Object.entries(wordFreq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 2)
+      .map(([word]) => word.charAt(0).toUpperCase() + word.slice(1));
+
+    if (topWords.length > 0) {
+      return topWords.join(" ");
+    }
+  }
+
+  // Last resort
+  return "Miscellaneous";
 };
 
 // Enhanced clustering with dual-prompt and iterative refinement (Phase 1)
@@ -356,8 +799,8 @@ export const clusterWithEmbeddings = async (
     // Level 0: Root, Level 1: Domains, Level 2: Subtopics
     const clusters = await hierarchicalHybridClustering(
       notes,
-      0.3, // Domain threshold
-      0.5 // Subtopic threshold
+      0.75, // Domain threshold (higher = more domains)
+      0.8 // Subtopic threshold (higher = more granular subtopics)
     );
 
     console.log(
@@ -531,7 +974,7 @@ export const hybridClusterWithEmbeddings = async (
     const partitions = embeddingGuidedPartitioning(
       embeddings,
       similarityThreshold,
-      2 // minClusterSize
+      1 // minClusterSize - allow more granular clusters
     );
 
     // Step 3: Generate meaningful names for each partition using LLM
@@ -568,6 +1011,49 @@ export const hybridClusterWithEmbeddings = async (
     // Convert to ClusterNodes with meaningful names
     let clusters = partitionsToClusterNodes(partitions, notes, partitionNames);
 
+    // FORCE SPLIT: If we only got 1 cluster with many notes, force split it
+    if (clusters.length === 1 && notes.length >= 10) {
+      console.warn(
+        `⚠️ Only 1 cluster detected with ${notes.length} notes. Forcing split by folder...`
+      );
+
+      // Group by folder as fallback
+      const folderGroups = new Map<string, Note[]>();
+      notes.forEach((note) => {
+        const folder = note.folder || "/misc";
+        if (!folderGroups.has(folder)) folderGroups.set(folder, []);
+        folderGroups.get(folder)!.push(note);
+      });
+
+      // Create clusters from folders
+      const folderClusters: ClusterNode[] = [];
+      let idx = 0;
+      for (const [folder, folderNotes] of folderGroups) {
+        if (folderNotes.length > 0) {
+          folderClusters.push({
+            id: `folder-cluster-${idx++}`,
+            name: folder
+              .replace(/^\//, "")
+              .replace(/-/g, " ")
+              .replace(/\b\w/g, (l) => l.toUpperCase()),
+            type: "cluster",
+            description: `Notes from ${folder}`,
+            children: folderNotes.map((note) => ({
+              id: `note-${note.id}`,
+              name: note.title,
+              type: "note" as const,
+              noteId: note.id,
+            })),
+          });
+        }
+      }
+
+      clusters = folderClusters;
+      console.log(
+        `✅ Force-split into ${clusters.length} folder-based clusters`
+      );
+    }
+
     const duration = Math.round(performance.now() - start);
     //print for debugging
     console.log("Clusters after embedding partitioning and naming:", clusters);
@@ -599,8 +1085,8 @@ export const hybridClusterWithEmbeddings = async (
  */
 export const hierarchicalHybridClustering = async (
   notes: Note[],
-  domainThreshold: number = 0.3,
-  subtopicThreshold: number = 0.5
+  domainThreshold: number = 0.75,
+  subtopicThreshold: number = 0.8
 ): Promise<ClusterNode[]> => {
   console.log(
     `🏗️ Starting 3-level hierarchical clustering for ${notes.length} notes...`
@@ -1019,6 +1505,9 @@ export const fullSemanticClustering = async (
   } = options;
 
   console.log("Starting full semantic clustering pipeline...");
+
+  // Update hash index to track these notes for future incremental updates
+  ingestNotes(notes);
 
   // Phase 2: Hybrid embeddings with 3-level hierarchy
   let clusters: ClusterNode[];

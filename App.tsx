@@ -3,7 +3,6 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Note, SearchMode, SearchResult, ProcessingStatus, ClusterNode } from './types';
 import { clusterNotesWithGemini, semanticSearchWithGemini, correctTextWithGemini } from './services/geminiService';
 import { incrementalCluster, benchmarkClustering, fullSemanticClustering } from './services/clusteringService';
-import { clusterNotesWithGemini, correctTextWithGemini } from './services/geminiService';
 import { executeExactSearch, executeHybridSearch } from './services/searchService';
 import { getAllNotes, saveNote, deleteNote, bulkSaveNotes } from './services/storageService';
 import { SearchIcon, FileTextIcon, NetworkIcon, ZapIcon, LayersIcon, ChevronRightIcon, ChevronDownIcon, FolderIcon, WifiOffIcon, UploadCloudIcon, XIcon, PlusIcon, WandIcon, TrashIcon, SaveIcon } from './components/Icons';
@@ -317,24 +316,8 @@ const App = () => {
   const [clusters, setClusters] = useState<ClusterNode[]>([]);
   const [hasClustered, setHasClustered] = useState(false);
 
-  // Clear all clustering caches on page load for fresh start
-  useEffect(() => {
-    const clearClusteringCaches = () => {
-      console.log('🧹 Clearing all clustering caches for fresh start...');
-      const keysToRemove = [
-        'clusters_cache_v1',
-        'note_hash_index_v1',
-        'clustering_memory_v1',
-        'embedding_index_v1'
-      ];
-      keysToRemove.forEach(key => {
-        localStorage.removeItem(key);
-        console.log(`  Removed: ${key}`);
-      });
-      console.log('✅ All caches cleared');
-    };
-    clearClusteringCaches();
-  }, []);
+  // Note: Cache clearing removed - we want to preserve incremental clustering state
+  // To force full re-clustering, user can clear browser cache manually
 
   // Folders State for Sidebar
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -440,7 +423,25 @@ const App = () => {
   };
 
   const handleCluster = async () => {
-    // Use full semantic clustering pipeline for best results
+    // If clusters already exist, run incremental clustering to add any new notes
+    if (hasClustered && clusters.length > 0) {
+      setStatus({ isProcessing: true, message: 'Updating clusters with new notes...' });
+      try {
+        console.log('🔄 Running incremental clustering to update graph...');
+        // Pass existing clusters from React state to preserve them
+        const updatedClusters = await incrementalCluster(notes, clusters);
+        setClusters(updatedClusters);
+        setViewMode('graph');
+        console.log('✅ Clusters updated, switching to graph view');
+      } catch (e) {
+        console.error('Incremental clustering failed:', e);
+      } finally {
+        setStatus({ isProcessing: false, message: '' });
+      }
+      return;
+    }
+
+    // Initial clustering - use full semantic clustering pipeline
     setStatus({ isProcessing: true, message: 'Running full semantic clustering pipeline...' });
     try {
       console.log('🚀 Starting fullSemanticClustering with', notes.length, 'notes');
@@ -527,11 +528,7 @@ const App = () => {
         // Update State
         setNotes(prev => [...prev, ...newNotes]);
         setExpandedFolders(prev => new Set(prev).add('/uploads'));
-        // Reset clustering
-        if (hasClustered) {
-          setHasClustered(false);
-          setClusters([]);
-        }
+        // Note: Keep existing clusters - incremental clustering will handle new notes
       }
     } catch (error) {
       console.error("Error reading files", error);
@@ -558,11 +555,7 @@ const App = () => {
     setActiveNoteId(newNote.id);
     setViewMode('editor');
     setExpandedFolders(prev => new Set(prev).add('/drafts'));
-    
-    if (hasClustered) {
-        setHasClustered(false);
-        setClusters([]);
-    }
+    // Note: Keep existing clusters - incremental clustering will handle the new note
 
     // Persist
     try {
@@ -624,11 +617,7 @@ const App = () => {
       const allFolders = new Set(mockNotes.map(n => n.folder));
       setExpandedFolders(prev => new Set([...prev, ...allFolders]));
       
-      // Reset clustering
-      if (hasClustered) {
-        setHasClustered(false);
-        setClusters([]);
-      }
+      // Note: Keep existing clusters - incremental clustering will handle new sample notes
       
       setStatus({ isProcessing: false, message: `✅ Loaded ${mockNotes.length} sample notes` });
       setTimeout(() => setStatus({ isProcessing: false, message: '' }), 3000);
@@ -646,10 +635,7 @@ const App = () => {
         if (activeNoteId === id) {
             setActiveNoteId(null);
         }
-        if (hasClustered) {
-            setHasClustered(false);
-            setClusters([]);
-        }
+        // Note: Keep existing clusters - next clustering will handle the deletion
 
         // Persist delete
         try {
@@ -858,12 +844,14 @@ const App = () => {
             className={`flex items-center justify-center gap-2 p-2 rounded text-xs font-bold transition-all ${
               viewMode === 'graph' ? 'bg-secondary text-white' : 
               !isOnline ? 'bg-white/5 text-muted cursor-not-allowed opacity-50' :
-              'bg-white/5 hover:bg-white/10 text-muted'
+              'bg-white/5 hover:bg-white/10 text-muted hover:text-white'
             }`}
-            title={!isOnline ? "Unavailable offline" : "Cluster AI"}
+            title={!isOnline ? "Unavailable offline" : hasClustered ? "View knowledge graph" : "Cluster notes with AI"}
           >
             <NetworkIcon className="w-3 h-3" />
-            {status.isProcessing && !hasClustered ? 'Thinking...' : !isOnline ? 'Offline' : 'Cluster AI'}
+            {status.isProcessing && !hasClustered ? 'Clustering...' : 
+             !isOnline ? 'Offline' : 
+             hasClustered ? 'View Graph' : 'Cluster AI'}
           </button>
           <button
             onClick={async () => {
