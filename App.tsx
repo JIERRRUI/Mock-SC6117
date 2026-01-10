@@ -525,7 +525,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, onUpload }) 
               ref={fileInputRef}
               className="hidden" 
               multiple 
-              accept=".md,.txt,.markdown,.html,.htm,.one"
+              accept=".md,.txt,.markdown,.html,.htm,.one,.pdf,.docx"
               onChange={(e) => {
                 if (e.target.files) onUpload(e.target.files);
               }}
@@ -795,6 +795,16 @@ const App = () => {
         else if (name.match(/\.one$/i)) {
           // OneNote Binary Import
           const extractedText = await extractTextFromBinary(file, title);
+          content = `# ${title}\n\n${extractedText}`;
+        }
+        else if (name.match(/\.pdf$/i)) {
+          // PDF Import
+          const extractedText = await extractTextFromPdf(file);
+          content = `# ${title}\n\n${extractedText}`;
+        }
+        else if (name.match(/\.docx$/i)) {
+          // Word Document Import
+          const extractedText = await extractTextFromDocx(file);
           content = `# ${title}\n\n${extractedText}`;
         }
 
